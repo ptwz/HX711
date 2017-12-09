@@ -7,8 +7,8 @@
     void yield(void) {};
 #endif
 
-HX711::HX711(byte dout, byte pd_sck, byte gain) {
-	begin(dout, pd_sck, gain);
+HX711::HX711(byte *dout, byte count, byte pd_sck, byte gain) {
+	begin(dout, count, pd_sck, gain);
 }
 
 HX711::HX711() {
@@ -17,9 +17,13 @@ HX711::HX711() {
 HX711::~HX711() {
 }
 
-void HX711::begin(byte dout, byte pd_sck, byte gain) {
+void HX711::begin(byte *dout, byte count, byte pd_sck, byte gain) {
 	PD_SCK = pd_sck;
-	DOUT = dout;
+	ic_count = count;
+	for (byte i=0; i<count; i++){
+		DOUT[i] = dout[i];
+		pinMode(DOUT[i], INPUT);
+	}
 
 	pinMode(PD_SCK, OUTPUT);
 	pinMode(DOUT, INPUT);
@@ -28,7 +32,12 @@ void HX711::begin(byte dout, byte pd_sck, byte gain) {
 }
 
 bool HX711::is_ready() {
-	return digitalRead(DOUT) == LOW;
+	bool ready;
+	ready = true;
+	for (byte i=0; i<ic_count; i++){
+		ready &= (digitalRead(DOUT[i]) == LOW);
+	}
+	return ready;
 }
 
 void HX711::set_gain(byte gain) {
@@ -45,10 +54,47 @@ void HX711::set_gain(byte gain) {
 	}
 
 	digitalWrite(PD_SCK, LOW);
-	read();
+	read(0);
 }
 
-long HX711::read() {
+void HX711::parallelShiftIn(unsigned long *dest){
+	byte value;
+	//memset(dest, 0, sizeof(*dest)*ic_count);
+	for (byte ic_no=0; ic_no<ic_count; ic_no++)
+		dest[ic_no]=0;
+	// 643686	742613	986572	1397212
+	//
+	for (byte bit_no=0; bit_no<24; bit_no++){
+		digitalWrite(PD_SCK, HIGH);
+		digitalWrite(PD_SCK, LOW);
+		for (byte ic_no=0; ic_no<ic_count; ic_no++){
+			dest[ic_no] <<= 1;
+			value = digitalRead(DOUT[ic_no]);
+			if ( (bit_no==0) && (value==1) ){
+				// Fill all bit_nos with one, when MSB is set
+				dest[ic_no] = -1;
+			}
+			dest[ic_no] |= value;
+		}
+	}
+}
+
+long *HX711::readAll(){
+	while (!is_ready()) {
+		// Will do nothing on Arduino but prevent resets of ESP8266 (Watchdog Issue)
+		yield();
+	}
+	parallelShiftIn(last_values);
+
+	// set the channel and the gain factor for the next reading using the clock pin
+	for (unsigned int i = 0; i < GAIN; i++) {
+		digitalWrite(PD_SCK, HIGH);
+		digitalWrite(PD_SCK, LOW);
+	}
+	return(last_values);
+}
+
+long HX711::read(byte channel) {
 	// wait for the chip to become ready
 	while (!is_ready()) {
 		// Will do nothing on Arduino but prevent resets of ESP8266 (Watchdog Issue)
@@ -86,26 +132,47 @@ long HX711::read() {
 	return static_cast<long>(value);
 }
 
-long HX711::read_average(byte times) {
+long *HX711::read_averages(byte times) {
+	long sum[8];
+	//memset(sum, 0, sizeof(sum));
+	for (byte i = 0; i< ic_count; i++)
+		sum[i]=0;
+
+	for (byte i = 0; i < times; i++) {
+		readAll();
+		for (byte x = 0; x < ic_count; x++)
+		{
+			sum[x] += last_values[x];
+		}
+		yield();
+	}
+	for (byte x = 0; x < ic_count; x++)
+		last_values[x] = sum[x] / times;
+	return last_values;
+}
+
+long HX711::read_average(byte times, byte channel) {
 	long sum = 0;
 	for (byte i = 0; i < times; i++) {
-		sum += read();
+		sum += read(channel);
 		yield();
 	}
 	return sum / times;
 }
 
-double HX711::get_value(byte times) {
-	return read_average(times) - OFFSET;
+double HX711::get_value(byte times, byte channel) {
+	return read_average(times, channel) - OFFSET[channel];
 }
 
-float HX711::get_units(byte times) {
-	return get_value(times) / SCALE;
+float HX711::get_units(byte times, byte channel) {
+	return get_value(times, channel) / SCALE;
 }
 
 void HX711::tare(byte times) {
-	double sum = read_average(times);
-	set_offset(sum);
+	read_averages(times);
+	for (byte i=0; i<ic_count; i++)
+		OFFSET[i] = last_values[i];
+	//set_offset(sum);
 }
 
 void HX711::set_scale(float scale) {
@@ -117,7 +184,8 @@ float HX711::get_scale() {
 }
 
 void HX711::set_offset(long offset) {
-	OFFSET = offset;
+	// TODO: STUB!!!
+	//OFFSET = offset;
 }
 
 long HX711::get_offset() {
